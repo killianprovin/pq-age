@@ -1,5 +1,6 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use base64::{engine::general_purpose, Engine as _};
+use chacha20poly1305::{ChaCha20Poly1305, Nonce, aead::Aead, KeyInit};
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -15,6 +16,10 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     KeyGen,
+    Encrypt {
+        #[arg(short, long)]
+        input: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -29,6 +34,14 @@ fn main() -> Result<()> {
             save_new_key(&key_path)?;
             
             println!("Identity generated at: {:?}", key_path);
+        }
+
+        Commands::Encrypt { input } => {
+            let key_path = get_config_path()?.join("key.txt");
+            let key_bytes = load_key(&key_path)?;
+            
+            encrypt_file(&input, &key_bytes)?;
+            println!("File encrypted successfully: {:?}", input.with_extension("pq"));
         }
     }
 
@@ -56,5 +69,36 @@ fn save_new_key(path: &PathBuf) -> Result<()> {
     fs::write(path, encoded)?;
     fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
     
+    Ok(())
+}
+
+fn load_key(path: &PathBuf) -> Result<Vec<u8>> {
+    let content = fs::read_to_string(path)
+        .context("Could not read key file. Run gen-key first.")?;
+    
+    general_purpose::STANDARD.decode(content.trim())
+        .map_err(|e| anyhow!("Invalid base64 key: {}", e))
+}
+
+fn encrypt_file(input_path: &PathBuf, key_bytes: &[u8]) -> Result<()> {
+    let data = fs::read(input_path).context("Failed to read input file")?;
+    
+    let cipher = ChaCha20Poly1305::new_from_slice(key_bytes)
+        .map_err(|_| anyhow!("Invalid key length"))?;
+    
+    // Generate a random 12-byte nonce
+    let nonce_bytes: [u8; 12] = rand::random();
+    let nonce = Nonce::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher.encrypt(nonce, data.as_ref())
+        .map_err(|_| anyhow!("Encryption failed"))?;
+
+    // Combine nonce + ciphertext
+    let mut output_data = nonce_bytes.to_vec();
+    output_data.extend_from_slice(&ciphertext);
+
+    let output_path = input_path.with_extension("pq");
+    fs::write(output_path, output_data)?;
+
     Ok(())
 }
