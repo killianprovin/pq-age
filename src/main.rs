@@ -1,13 +1,22 @@
-use anyhow::{anyhow, Context, Result};
-use base64::{engine::general_purpose, Engine as _};
-use chacha20poly1305::{ChaCha20Poly1305, Nonce, aead::Aead, KeyInit};
+use anyhow::Result;
 use clap::{Parser, Subcommand};
-use std::fs;
-use std::os::unix::fs::PermissionsExt;
+use std::fs::File;
 use std::path::PathBuf;
 
+mod crypto;
+mod keystore;
+
+fn expand(path: PathBuf) -> PathBuf {
+    if let Ok(stripped) = path.strip_prefix("~") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(stripped);
+        }
+    }
+    path
+}
+
 #[derive(Parser)]
-#[command(name = "pq-age", version = "0.1.0", about = "Post-Quantum file encryption tool")]
+#[command(name = "pq-age", version, about = "Post-quantum file encryption")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -20,6 +29,10 @@ enum Commands {
         #[arg(short, long)]
         input: PathBuf,
     },
+    Decrypt {
+        #[arg(short, long)]
+        input: PathBuf,
+    },
 }
 
 fn main() -> Result<()> {
@@ -27,78 +40,30 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::KeyGen => {
-            let config_dir = get_config_path()?;
-            ensure_directory(&config_dir)?;
-            
-            let key_path = config_dir.join("key.txt");
-            save_new_key(&key_path)?;
-            
-            println!("Identity generated at: {:?}", key_path);
+            let path = keystore::config_dir()?.join("key.txt");
+            keystore::generate_and_save(&path)?;
+            println!("Key saved to {}", path.display());
         }
 
         Commands::Encrypt { input } => {
-            let key_path = get_config_path()?.join("key.txt");
-            let key_bytes = load_key(&key_path)?;
-            
-            encrypt_file(&input, &key_bytes)?;
-            println!("File encrypted successfully: {:?}", input.with_extension("pq"));
+            let input = expand(input);
+            let key = keystore::load(&keystore::config_dir()?.join("key.txt"))?;
+            let output = input.with_extension("pq");
+            crypto::encrypt(File::open(&input)?, File::create(&output)?, &key)?;
+            println!("Encrypted: {}", output.display());
+        }
+
+        Commands::Decrypt { input } => {
+            let input = expand(input);
+            let key = keystore::load(&keystore::config_dir()?.join("key.txt"))?;
+            let output = match input.extension().and_then(|e| e.to_str()) {
+                Some("pq") => input.with_extension(""),
+                _ => input.with_extension("dec"),
+            };
+            crypto::decrypt(File::open(&input)?, File::create(&output)?, &key)?;
+            println!("Decrypted: {}", output.display());
         }
     }
-
-    Ok(())
-}
-
-fn get_config_path() -> Result<PathBuf> {
-    dirs::home_dir()
-        .map(|p| p.join(".pq-age"))
-        .ok_or_else(|| anyhow!("Could not find home directory"))
-}
-
-fn ensure_directory(path: &PathBuf) -> Result<()> {
-    if !path.exists() {
-        fs::create_dir_all(path)?;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-fn save_new_key(path: &PathBuf) -> Result<()> {
-    let key: [u8; 32] = rand::random();
-    let encoded = general_purpose::STANDARD.encode(key);
-
-    fs::write(path, encoded)?;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-    
-    Ok(())
-}
-
-fn load_key(path: &PathBuf) -> Result<Vec<u8>> {
-    let content = fs::read_to_string(path)
-        .context("Could not read key file. Run gen-key first.")?;
-    
-    general_purpose::STANDARD.decode(content.trim())
-        .map_err(|e| anyhow!("Invalid base64 key: {}", e))
-}
-
-fn encrypt_file(input_path: &PathBuf, key_bytes: &[u8]) -> Result<()> {
-    let data = fs::read(input_path).context("Failed to read input file")?;
-    
-    let cipher = ChaCha20Poly1305::new_from_slice(key_bytes)
-        .map_err(|_| anyhow!("Invalid key length"))?;
-    
-    // Generate a random 12-byte nonce
-    let nonce_bytes: [u8; 12] = rand::random();
-    let nonce = Nonce::from_slice(&nonce_bytes);
-
-    let ciphertext = cipher.encrypt(nonce, data.as_ref())
-        .map_err(|_| anyhow!("Encryption failed"))?;
-
-    // Combine nonce + ciphertext
-    let mut output_data = nonce_bytes.to_vec();
-    output_data.extend_from_slice(&ciphertext);
-
-    let output_path = input_path.with_extension("pq");
-    fs::write(output_path, output_data)?;
 
     Ok(())
 }
