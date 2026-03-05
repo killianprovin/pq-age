@@ -28,6 +28,15 @@ pub fn encapsulate(ek_bytes: &[u8; EK_SIZE]) -> ([u8; CT_SIZE], [u8; SS_SIZE]) {
     (ct_slice.try_into().unwrap(), ss_slice.try_into().unwrap())
 }
 
+pub fn public_from_seed(seed_bytes: &[u8; DK_SIZE]) -> [u8; EK_SIZE] {
+    let seed = Seed::try_from(&seed_bytes[..]).unwrap();
+    let dk = DecapsulationKey::<MlKem768>::from_seed(seed);
+    let ek = dk.encapsulation_key().clone();
+    let ek_arr = ek.to_bytes();
+    let ek_slice: &[u8] = ek_arr.as_ref();
+    ek_slice.try_into().unwrap()
+}
+
 pub fn decapsulate(dk_bytes: &[u8; DK_SIZE], ct: &[u8; CT_SIZE]) -> [u8; SS_SIZE] {
     let seed = Seed::try_from(&dk_bytes[..]).unwrap();
     let dk = DecapsulationKey::<MlKem768>::from_seed(seed);
