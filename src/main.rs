@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 mod crypto;
 mod exchange;
+mod kem;
 mod keystore;
 
 fn expand(path: PathBuf) -> PathBuf {
@@ -30,7 +31,7 @@ enum Commands {
     Encrypt {
         #[arg(short, long)]
         input: PathBuf,
-        /// Recipient public key file (default: own identity.pub)
+        /// Recipient key directory (default: own ~/.pq-age)
         #[arg(short, long)]
         recipient: Option<PathBuf>,
     },
@@ -53,26 +54,33 @@ fn main() -> Result<()> {
         Commands::Encrypt { input, recipient } => {
             let input = expand(input);
             let dir = keystore::config_dir()?;
-            let pub_path = recipient.map(expand).unwrap_or_else(|| dir.join("identity.pub"));
-            let recipient_pub = keystore::load_public(&pub_path)?;
+            let rec = recipient.map(expand).unwrap_or(dir);
 
-            let (eph_pub, sym_key) = exchange::encapsulate(&recipient_pub);
+            let x25519_pub = keystore::load_x25519_public(&rec)?;
+            let mlkem_pub = keystore::load_mlkem_public(&rec)?;
+            let (eph_x25519, mlkem_ct, sym_key) = exchange::encapsulate(&x25519_pub, &mlkem_pub);
 
             let output = input.with_extension("pq");
             let mut out = File::create(&output)?;
-            out.write_all(&eph_pub)?;
+            out.write_all(&eph_x25519)?;
+            out.write_all(&mlkem_ct)?;
             crypto::encrypt(File::open(&input)?, out, &sym_key)?;
             println!("Encrypted: {}", output.display());
         }
 
         Commands::Decrypt { input } => {
             let input = expand(input);
-            let secret = keystore::load_secret(&keystore::config_dir()?.join("identity.key"))?;
+            let dir = keystore::config_dir()?;
 
             let mut f = File::open(&input)?;
-            let mut eph_pub = [0u8; 32];
-            f.read_exact(&mut eph_pub)?;
-            let sym_key = exchange::decapsulate(&eph_pub, &secret);
+            let mut eph_x25519 = [0u8; 32];
+            let mut mlkem_ct = [0u8; kem::CT_SIZE];
+            f.read_exact(&mut eph_x25519)?;
+            f.read_exact(&mut mlkem_ct)?;
+
+            let x25519_sk = keystore::load_x25519_secret(&dir)?;
+            let mlkem_dk = keystore::load_mlkem_secret(&dir)?;
+            let sym_key = exchange::decapsulate(&eph_x25519, &x25519_sk, &mlkem_ct, &mlkem_dk);
 
             let output = match input.extension().and_then(|e| e.to_str()) {
                 Some("pq") => input.with_extension(""),
