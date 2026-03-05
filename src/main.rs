@@ -1,3 +1,5 @@
 fn main() {
-    println!("Hello, world!");
+    let key: [u8; 32] = rand::random();
+
+    println!("Generated key: {:?}", key);
 }
